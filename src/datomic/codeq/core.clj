@@ -13,6 +13,7 @@
             [clojure.string :as string]
             [datomic.codeq.util :refer [cond-> index->id-fn tempid?]]
             [datomic.codeq.analyzer :as az]
+            [datomic.codeq.git :as git]
             [datomic.codeq.analyzers.clj])
   (:import java.util.Date)
   (:gen-class))
@@ -307,46 +308,16 @@
           name (subs name 0 (.indexOf name "."))]
       [uri name])))
 
+(def *repo* (git/load-repo "."))
+(def *rev-walk* (git/new-rev-walk *repo*))
+
 (defn dir
-  "Returns [[sha :type filename] ...]"
   [tree]
-  (with-open [s (exec-stream (str "git cat-file -p " tree))]
-    (let [es (line-seq s)]
-      (mapv #(let [ss (string/split ^String % #"\s")]
-               [(nth ss 2)
-                (keyword (nth ss 1))
-                (subs % (inc (.indexOf ^String % "\t")) (count %))])
-            es))))
+  (git/cat-tree *repo* tree))
 
 (defn commit
   [[sha _]]
-  (let [trim-email (fn [s] (subs s 1 (dec (count s))))
-        dt (fn [ds] (Date. (* 1000 (Integer/parseInt ds))))
-        [tree parents author committer msg]
-        (with-open [s (exec-stream (str "git cat-file -p " sha))]
-          (let [lines (line-seq s)
-                slines (mapv #(string/split % #"\s") lines)
-                tree (-> slines (nth 0) (nth 1))
-                [plines xs] (split-with #(= (nth % 0) "parent") (rest slines))]
-            [tree
-             (seq (map second plines))
-             (vec (reverse (first xs)))
-             (vec (reverse (second xs)))
-             (->> lines 
-                  (drop-while #(not= % ""))
-                  rest
-                  (interpose "\n")
-                  (apply str))]))]
-    {:sha sha
-     :msg msg
-     :tree tree
-     :parents parents
-     :author (trim-email (author 2))
-     :authored (dt (author 1))
-     :committer (trim-email (committer 2))
-     :committed (dt (committer 1))}))
-
-
+  (git/commit-info *repo* *rev-walk* (git/find-rev-commit *repo* *rev-walk* sha)))
 
 (defn commit-tx-data
   [db repo repo-name {:keys [sha msg tree parents author authored committer committed] :as commit}]
@@ -439,7 +410,7 @@
                               [?tx :tx/commit ?e]
                               [?e :git/sha ?sha]]
                             db))]
-    (pmap commit (remove (fn [[sha _]] (imported sha)) (commits commit-name)))))
+    (map commit (remove (fn [[sha _]] (imported sha)) (commits commit-name)))))
 
 
 (defn ensure-db [db-uri]
@@ -510,8 +481,7 @@
           ;;analyze them
           (println "analyzing file:" f " - sha: " (:git/sha (d/entity db f)))
           (let [db (d/db conn)
-                src (with-open [s (exec-stream (str "git cat-file -p " (:git/sha (d/entity db f))))]
-                      (slurp s))
+                src (git/cat-file *repo* *rev-walk* (:git/sha (d/entity db f)))
                 adata (try
                         (az/analyze a db f src)
                         (catch Exception ex
